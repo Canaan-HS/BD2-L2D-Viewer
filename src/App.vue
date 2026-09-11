@@ -448,6 +448,7 @@ function onCustomBgUpload(image: string | null) {
   if (image && image === store.customBackgroundImage) {
     store.customBackgroundImage = null
   }
+  store.backgroundIsAuto = false
   store.customBackgroundImage = image
 }
 

@@ -12,6 +12,7 @@ export interface Character {
   dating: string
   audio: string
   icon: string,
+  matchedCharacterId?: string,
   displayMode?: CharacterDisplayMode,
   datingUsesTracks?: boolean,
   customFiles?: {
@@ -19,7 +20,8 @@ export interface Character {
     json?: string,
     atlas: string,
     images: Record<string, string>
-  }
+  },
+  externalBackgrounds?: string[]
 }
 
 const characterArray: Character[] = Object.entries(character_list).map(([id, char]) => ({
@@ -38,9 +40,13 @@ export const useCharacterStore = defineStore('characterStore', {
     animationCategory: 'character' as AnimationCategory,
     playing: true,
     animationSpeed: 1,
-    backgroundColor: '#1f2937',
+    abLoopStart: null as number | null,
+    abLoopEnd: null as number | null,
+    playhead: 0,
+    backgroundColor: '#4b4b4b',
     useCurrentCamera: false,
     customBackgroundImage: null as string | null,
+    backgroundIsAuto: false,
     layerNames: [] as string[],
     layerVisibility: {} as Record<string, boolean>,
     layerSelectionEnabled: false as boolean,

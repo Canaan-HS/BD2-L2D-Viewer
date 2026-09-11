@@ -29,9 +29,10 @@
       <div
         v-for="char in filteredCharacters"
         :key="char.id"
-        class="relative flex items-center py-2 cursor-pointer overflow-hidden rounded"
+        class="relative flex items-center py-2 cursor-pointer overflow-hidden rounded select-none"
         :class="{ 'bg-gray-700': char.id === store.selectedCharacterId }"
         @click="select(char.id)"
+        @dblclick.prevent="copyName($event, char)"
       >
         <span
           v-if="char.displayMode"
@@ -43,13 +44,19 @@
         </span>
         <img
           :src="icons[char.icon] || icons['unknown']"
-          :alt="char.costumeName"
+          :alt="char.costumeName || char.charName"
           class="w-16 h-16 object-cover rounded-[50%]"
         />
-        <div class="flex-grow pl-2">
-          <span class="text-lg">{{ char.charName + ': ' + char.costumeName }}</span>
+        <div class="flex-grow min-w-0 pl-2">
+          <span class="text-lg break-all">{{ displayName(char) }}</span>
         </div>
         <div class="flex flex-shrink-0 gap-1 pl-2 pr-2">
+          <div
+            v-if="char.customFiles"
+            class="w-auto h-6 px-2 bg-indigo-500 text-white flex items-center justify-center text-xs font-bold rounded"
+          >
+            EX
+          </div>
           <div
             v-if="char.dating"
             class="w-auto h-6 px-2 bg-blue-500 text-white flex items-center justify-center text-xs font-bold rounded"
@@ -115,6 +122,17 @@
           <button
             type="button"
             class="w-full flex items-center justify-between gap-3 rounded border px-3 py-3 text-left transition-colors"
+            :class="showCustomOnly ? 'border-indigo-400 bg-indigo-500/15' : 'border-gray-700 hover:bg-gray-700/70'"
+            :aria-pressed="showCustomOnly"
+            @click="showCustomOnly = !showCustomOnly"
+          >
+            <span class="text-sm text-gray-100">Custom models</span>
+            <span class="h-6 px-2 bg-indigo-500 text-white flex items-center justify-center text-xs font-bold rounded">EX</span>
+          </button>
+
+          <button
+            type="button"
+            class="w-full flex items-center justify-between gap-3 rounded border px-3 py-3 text-left transition-colors"
             :class="characterTypeFilter === 'playable' ? 'border-emerald-400 bg-emerald-500/15' : 'border-gray-700 hover:bg-gray-700/70'"
             :aria-pressed="characterTypeFilter === 'playable'"
             @click="characterTypeFilter = characterTypeFilter === 'playable' ? 'all' : 'playable'"
@@ -153,7 +171,7 @@
 <script setup lang="ts">
 import icons from '@/utils/charIcons';
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useCharacterStore } from '@/stores/characterStore'
+import { useCharacterStore, type Character } from '@/stores/characterStore'
 
 const emit = defineEmits(['select'])
 const store = useCharacterStore()
@@ -162,9 +180,10 @@ const filter = ref('')
 const filterModalOpen = ref(false)
 const showFatedGuestOnly = ref(false)
 const showUltimateOnly = ref(false)
+const showCustomOnly = ref(false)
 const characterTypeFilter = ref<'all' | 'playable' | 'npc'>('all')
 const hasActiveFilters = computed(
-  () => showFatedGuestOnly.value || showUltimateOnly.value || characterTypeFilter.value !== 'all',
+  () => showFatedGuestOnly.value || showUltimateOnly.value || showCustomOnly.value || characterTypeFilter.value !== 'all',
 )
 
 const filteredCharacters = computed(() =>
@@ -175,16 +194,19 @@ const filteredCharacters = computed(() =>
       const matchesSearch = !query || (c.charName + ' ' + c.costumeName).toLowerCase().includes(query)
       const matchesFatedGuest = !showFatedGuestOnly.value || !!c.dating
       const matchesUltimate = !showUltimateOnly.value || !!c.cutscene
+      const matchesCustom = !showCustomOnly.value || !!c.customFiles
       const isNpc = c.charName.includes('(Npc)')
       const matchesCharacterType =
         characterTypeFilter.value === 'all' ||
         (characterTypeFilter.value === 'npc' && isNpc) ||
         (characterTypeFilter.value === 'playable' && !isNpc)
-      return matchesSearch && matchesFatedGuest && matchesUltimate && matchesCharacterType
+      return matchesSearch && matchesFatedGuest && matchesUltimate && matchesCustom && matchesCharacterType
     })
     .sort(
       (a, b) =>
-        Number(!!b.character.displayMode) - Number(!!a.character.displayMode) || a.index - b.index,
+        Number(!!b.character.customFiles) - Number(!!a.character.customFiles) ||
+        Number(!!b.character.displayMode) - Number(!!a.character.displayMode) ||
+        a.index - b.index,
     )
     .map(({ character }) => character)
 )
@@ -195,9 +217,52 @@ function select(id: string) {
   store.selectedCharacterId = id
 }
 
+function displayName(char: Character) {
+  if (char.customFiles) return char.charName
+  return char.costumeName ? `${char.charName}: ${char.costumeName}` : char.charName
+}
+
+let copyTipTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyName(event: MouseEvent, char: Character) {
+  const text = displayName(char)
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    fallbackCopyText(text)
+  }
+  showCopyTip(event.clientX, event.clientY)
+}
+
+function fallbackCopyText(text: string) {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy') // 雖然現代該語法已經被淘汰, 但對於舊瀏覽器有效
+  textarea.remove()
+}
+
+function showCopyTip(x: number, y: number) {
+  clearTimeout(copyTipTimer)
+  document.getElementById('copy-name-tip')?.remove()
+  const tip = document.createElement('div')
+  tip.id = 'copy-name-tip'
+  tip.textContent = 'Copied!'
+  tip.style.cssText =
+    'position:fixed;z-index:9999;pointer-events:none;padding:2px 8px;border-radius:4px;background:#111827;color:#fff;font-size:12px;line-height:1.5;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.4);transform:translate(8px,-100%);'
+  tip.style.left = `${x}px`
+  tip.style.top = `${y}px`
+  document.body.appendChild(tip)
+  copyTipTimer = setTimeout(() => tip.remove(), 1500)
+}
+
 function resetFilters() {
   showFatedGuestOnly.value = false
   showUltimateOnly.value = false
+  showCustomOnly.value = false
   characterTypeFilter.value = 'all'
 }
 
