@@ -1,24 +1,26 @@
 <template>
-  <div class="relative w-full h-full" data-tutorial="character-viewer">
+  <div
+    ref="viewerRootRef"
+    class="relative w-full h-full"
+    data-tutorial="character-viewer"
+    :class="[
+      cssFallbackFullscreen ? 'fs-css-fallback' : '',
+      {
+        'viewer-fullscreen': isFullscreen,
+        'chrome-hidden': isFullscreen && !chromeVisible,
+      },
+    ]"
+    @pointermove="onViewerPointerActivity"
+    @pointerdown="onViewerPointerActivity"
+  >
     <div
       ref="toolbarRef"
-      class="absolute left-2 flex flex-col gap-2 pointer-events-auto transition-opacity duration-150"
+      class="viewer-chrome-top absolute left-2 flex flex-col gap-2 pointer-events-auto transition-opacity duration-150"
       :class="[
         showingMobileOverlay ? 'opacity-0 pointer-events-none' : 'opacity-100 z-40',
         inspectMode ? 'top-2' : 'top-16 lg:top-2',
       ]"
     >
-      <button
-        ref="editToggleRef"
-        type="button"
-        @click="toggleBackgroundEditing"
-        :aria-pressed="editingBackground"
-        :disabled="!hasBackgroundImage"
-        v-show="hasBackgroundImage"
-        :class="editButtonClasses"
-      >
-        <BgEditIcon />
-      </button>
       <div class="flex flex-row gap-2">
         <button
           type="button"
@@ -49,6 +51,28 @@
           class="w-8 h-8 p-1.5 rounded-md hidden lg:flex items-center justify-center bg-gray-800/70 hover:bg-gray-700/70 text-white transition-colors"
         >
           <PlusIcon />
+        </button>
+        <button
+          ref="editToggleRef"
+          type="button"
+          aria-label="Edit background"
+          @click="toggleBackgroundEditing"
+          :aria-pressed="editingBackground"
+          :disabled="!hasBackgroundImage"
+          v-show="hasBackgroundImage"
+          :class="editButtonClasses"
+        >
+          <BgEditIcon />
+        </button>
+        <button
+          type="button"
+          aria-label="Toggle fullscreen"
+          :aria-pressed="isFullscreen"
+          @click="toggleViewerFullscreen"
+          class="w-8 h-8 p-1.5 rounded-md flex items-center justify-center bg-gray-800/70 hover:bg-gray-700/70 text-white transition-colors"
+          :class="{ 'bg-indigo-600/90 hover:bg-indigo-500': isFullscreen }"
+        >
+          <ExpandIcon />
         </button>
       </div>
     </div>
@@ -92,6 +116,7 @@
     <div
       v-if="store.selectedLayerName"
       class="absolute bottom-6 left-1/2 -translate-x-1/2 bg-gray-900/80 text-white px-4 py-3 rounded-full z-50 pointer-events-none shadow-lg shadow-black/50 text-sm border border-gray-700 backdrop-blur-sm transition-opacity"
+      :class="{ 'opacity-0': isFullscreen && !chromeVisible }"
     >
       Selected Layer: <span class="font-bold text-indigo-400">{{ store.selectedLayerName }}</span>
     </div>
@@ -102,9 +127,10 @@
       step="0.001"
       v-model.number="progress"
       @input="seek"
+      :style="seekRangeStyle"
       v-show="!showingMobileOverlay"
       :disabled="showingMobileOverlay"
-      class="seek-range absolute bottom-0 left-0 w-full z-30"
+      class="seek-range viewer-chrome-bottom absolute bottom-0 left-0 w-full z-30"
     />
   </div>
 </template>
@@ -143,6 +169,7 @@ import cutsceneComposites, {
 } from '@/utils/cutscene_mappings'
 
 import BgEditIcon from '@/components/icons/BgEditIcon.vue'
+import ExpandIcon from '@/components/icons/ExpandIcon.vue'
 import InspectAnimationIcon from '@/components/icons/InspectAnimationIcon.vue'
 import LayerSelectIcon from '@/components/icons/LayerSelectIcon.vue'
 import MinusIcon from '@/components/icons/MinusIcon.vue'
@@ -212,6 +239,27 @@ const overlayCanvas = ref<HTMLCanvasElement | null>(null)
 const progress = ref(0)
 const store = useCharacterStore()
 const settingsStore = useSettingsStore()
+
+function getAbLoopRange(): { start: number; end: number } | null {
+  const start = store.abLoopStart
+  const end = store.abLoopEnd
+  if (start === null || end === null || end <= start) return null
+  return { start, end }
+}
+
+watch(progress, value => {
+  store.playhead = value
+})
+
+const seekRangeStyle = computed(() => {
+  const range = getAbLoopRange()
+  if (!range) return undefined
+  const a = (range.start * 100).toFixed(2)
+  const b = (range.end * 100).toFixed(2)
+  return {
+    background: `linear-gradient(to right, rgba(255,255,255,0.5) ${a}%, rgba(99,102,241,0.85) ${a}%, rgba(99,102,241,0.85) ${b}%, rgba(255,255,255,0.5) ${b}%)`,
+  }
+})
 
 const props = defineProps<{ mobileOverlayActive?: boolean; inspectMode?: boolean }>()
 const showingMobileOverlay = computed(() => props.mobileOverlayActive ?? false)
@@ -1096,9 +1144,20 @@ function renderCompositeFrame(timestamp?: number) {
       applySegmentsToState(overlay.state, overlay.skeleton, overlay.segments, compositeElapsed, true)
       applyLayerVisibility(overlay.skeleton, overlay.source)
     })
-    if (!exportingAnimation && compositeDuration > 0 && compositeElapsed >= compositeDuration - 0.0001 && compositeMapping) {
-      void startComposite(player, compositeMapping, compositeElapsed % compositeDuration)
-      return
+    if (!exportingAnimation && compositeDuration > 0 && compositeMapping) {
+      const activeAbLoop = getAbLoopRange()
+      const loopEndTime = activeAbLoop ? activeAbLoop.end * compositeDuration : compositeDuration
+      if (compositeElapsed >= loopEndTime - 0.0001) {
+        let resumeTime = compositeElapsed % compositeDuration
+        if (activeAbLoop) {
+          const loopStartTime = activeAbLoop.start * compositeDuration
+          const span = loopEndTime - loopStartTime
+          const offset = span > 0 ? (((compositeElapsed - loopEndTime) % span) + span) % span : 0
+          resumeTime = loopStartTime + offset
+        }
+        void startComposite(player, compositeMapping, resumeTime)
+        return
+      }
     }
   } else {
     player.animationState.apply(player.skeleton)
@@ -1448,7 +1507,9 @@ function applyPlayerBackgroundTransparency(target?: SpinePlayer | null) {
   if (!instance) return
   const internal = instance as unknown as SpinePlayerInternal
   internal.config.backgroundColor = '00000000'
+  internal.config.fullScreenBackgroundColor = '00000000'
   internal.bg.setFromString('00000000')
+  internal.bgFullscreen?.setFromString('00000000')
   instance.dom.style.backgroundColor = 'transparent'
   if (instance.canvas) {
     instance.canvas.style.backgroundColor = 'transparent'
@@ -1560,6 +1621,7 @@ function loadBackgroundAsset(source?: string) {
   }
   const handleError = () => {
     if (src) {
+      store.backgroundIsAuto = false
       store.customBackgroundImage = null
       setBackgroundSource(null)
     }
@@ -1789,6 +1851,17 @@ watch(activeBackgroundSrc, src => {
   setBackgroundSource(src)
 })
 
+function syncExternalBackground() {
+  if (store.customBackgroundImage && !store.backgroundIsAuto) return
+  const next =
+    store.characters.find(c => c.id === store.selectedCharacterId)?.externalBackgrounds?.[0] ?? null
+  if (next === store.customBackgroundImage) return
+  store.backgroundIsAuto = !!next
+  store.customBackgroundImage = next
+}
+
+watch(() => store.selectedCharacterId, syncExternalBackground, { immediate: true })
+
 async function load() {
   if (!container.value) return
   clearCharacterClickTracking()
@@ -1836,6 +1909,7 @@ async function load() {
     atlasUrl,
   rawDataURIs,
   backgroundColor: store.backgroundColor,
+  fullScreenBackgroundColor: store.backgroundColor,
   preserveDrawingBuffer: true,
   premultipliedAlpha: true,
   alpha: true,
@@ -1873,10 +1947,19 @@ async function load() {
               compositeElapsed = hasTracks ? time : compositeElapsed + delta * speed
             }
             compositeLastTimestamp = now
-            if (!exportingAnimation && compositeDuration > 0 && compositeElapsed >= compositeDuration - 0.0001) {
+            const activeAbLoop = !exportingAnimation ? getAbLoopRange() : null
+            const loopEndTime = activeAbLoop ? activeAbLoop.end * compositeDuration : compositeDuration
+            if (!exportingAnimation && compositeDuration > 0 && compositeElapsed >= loopEndTime - 0.0001) {
               if (!compositeRestarting) {
                 compositeRestarting = true
-                void startComposite(player, compositeMapping, compositeElapsed % compositeDuration)
+                let resumeTime = compositeElapsed % compositeDuration
+                if (activeAbLoop) {
+                  const loopStartTime = activeAbLoop.start * compositeDuration
+                  const span = loopEndTime - loopStartTime
+                  const offset = span > 0 ? (((compositeElapsed - loopEndTime) % span) + span) % span : 0
+                  resumeTime = loopStartTime + offset
+                }
+                void startComposite(player, compositeMapping, resumeTime)
                   .finally(() => {
                     compositeRestarting = false
                   })
@@ -1909,6 +1992,18 @@ async function load() {
           if (entry && entry.animation) {
             const d = entry.animation.duration
             if (d > 0) {
+              const activeAbLoop = getAbLoopRange()
+              if (activeAbLoop) {
+                const loopStartTime = activeAbLoop.start * d
+                const loopEndTime = activeAbLoop.end * d
+                const rawTime = entry.trackTime % d
+                if (rawTime >= loopEndTime - 0.0001) {
+                  const span = loopEndTime - loopStartTime
+                  const offset = span > 0 ? (((rawTime - loopEndTime) % span) + span) % span : 0
+                  entry.trackTime += loopStartTime + offset - rawTime
+                  entry.nextTrackLast = entry.trackTime
+                }
+              }
               progress.value = (entry.trackTime % d) / d
             }
           }
@@ -2081,6 +2176,8 @@ async function load() {
   updateCanvasPointerEvents(player)
 }
 watch(() => store.selectedCharacterId, () => {
+  store.abLoopStart = null
+  store.abLoopEnd = null
   preloadSelectedCharacterAudio()
   if (recorder && recorder.state === 'recording') {
     cancelExport = true
@@ -2095,6 +2192,8 @@ watch(() => store.selectedCharacterId, () => {
 })
 
 watch(() => store.animationCategory, category => {
+  store.abLoopStart = null
+  store.abLoopEnd = null
   if (category !== 'character') stopCharacterAudio()
   if (recorder && recorder.state === 'recording') {
     cancelExport = true
@@ -2319,7 +2418,7 @@ function getSelectedCharacterAudioConfig() {
   const audioName = character?.audio?.trim()
   if (!character || !audioName) return null
 
-  const audioCharacterId = character.id
+  const audioCharacterId = character.matchedCharacterId ?? character.id
   if (!/^\d+(?:_c)?$/i.test(audioCharacterId)) return null
 
   const language = settingsStore.audioLanguage
@@ -2616,8 +2715,80 @@ function onKeyDown(e: KeyboardEvent) {
   }
 }
 
+const viewerRootRef = ref<HTMLElement | null>(null)
+const cssFallbackFullscreen = ref(false)
+const isFullscreen = ref(false)
+const chromeVisible = ref(true)
+let chromeHideTimer: number | null = null
+
+function clearChromeHideTimer() {
+  if (chromeHideTimer !== null) {
+    window.clearTimeout(chromeHideTimer)
+    chromeHideTimer = null
+  }
+}
+
+function scheduleChromeHide() {
+  clearChromeHideTimer()
+  chromeHideTimer = window.setTimeout(() => {
+    chromeVisible.value = false
+    chromeHideTimer = null
+  }, 2200)
+}
+
+function onViewerPointerActivity() {
+  if (!isFullscreen.value) return
+  if (!chromeVisible.value) chromeVisible.value = true
+  scheduleChromeHide()
+}
+
+function enterCssFallback() {
+  cssFallbackFullscreen.value = true
+  isFullscreen.value = true
+  scheduleChromeHide()
+}
+
+function exitFullscreenState() {
+  cssFallbackFullscreen.value = false
+  isFullscreen.value = false
+  chromeVisible.value = true
+  clearChromeHideTimer()
+}
+
+async function toggleViewerFullscreen() {
+  const root = viewerRootRef.value
+  if (!root) return
+  try {
+    if (isFullscreen.value) {
+      if (document.fullscreenElement === root) {
+        await document.exitFullscreen()
+      }
+      exitFullscreenState()
+    } else if (typeof root.requestFullscreen === 'function') {
+      await root.requestFullscreen()
+    } else {
+      enterCssFallback()
+    }
+  } catch {
+    if (!isFullscreen.value) {
+      enterCssFallback()
+    }
+  }
+}
+
+function onFullscreenChange() {
+  const nativeActive = !!viewerRootRef.value && document.fullscreenElement === viewerRootRef.value
+  isFullscreen.value = nativeActive || cssFallbackFullscreen.value
+  if (isFullscreen.value) {
+    scheduleChromeHide()
+  } else {
+    exitFullscreenState()
+  }
+}
+
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
   ensureResizeObserver()
   if (activeBackgroundSrc.value) {
     setBackgroundSource(activeBackgroundSrc.value)
@@ -2628,6 +2799,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  clearChromeHideTimer()
   clearCharacterClickTracking()
   clearCharacterAudioPool()
   stopPointerTracking()
@@ -2652,6 +2825,11 @@ onBeforeUnmount(() => {
 
 function seek() {
   if (!player) return
+  const activeAbLoop = getAbLoopRange()
+  if (activeAbLoop && (progress.value < activeAbLoop.start - 0.0001 || progress.value > activeAbLoop.end + 0.0001)) {
+    store.abLoopStart = null
+    store.abLoopEnd = null
+  }
   const mapping = getCompositeForAnimation(store.selectedAnimation)
   if (mapping) {
     const targetTime = progress.value * compositeDuration
@@ -2869,13 +3047,14 @@ async function exportAnimation(transparent: boolean): Promise<void> {
     let duration = 3
     let timelineEnd = duration
     mapping = getCompositeForAnimation(animName)
+    const abLoop = getAbLoopRange()
     if (animName && state) {
       if (mapping) {
         const info = await scheduleCompositeTimeline(p, mapping, 0)
         duration = info.duration
         timelineEnd = info.duration || duration || 3
         store.playing = true
-        await startComposite(p, mapping, 0)
+        await startComposite(p, mapping, abLoop ? abLoop.start * timelineEnd : 0)
       } else {
         const anim = state.data.skeletonData.animations.find(
           (a: Animation) => a.name === animName,
@@ -2890,10 +3069,19 @@ async function exportAnimation(transparent: boolean): Promise<void> {
           skeleton.updateWorldTransform()
           ;(p as unknown as SpinePlayerInternal).drawFrame(false)
         }
+        if (abLoop) {
+          const trackIndex = getActiveTrackIndexForSelectedAnimation(state)
+          const entry = state.getCurrent(trackIndex)
+          if (entry && entry.animation) {
+            entry.trackTime = entry.animationEnd * abLoop.start
+            entry.nextTrackLast = entry.trackTime
+          }
+        }
       }
     }
 
-    const recordDuration = timelineEnd / (p.speed || store.animationSpeed || 1)
+    const recordSpan = abLoop ? (abLoop.end - abLoop.start) * timelineEnd : timelineEnd
+    const recordDuration = recordSpan / (p.speed || store.animationSpeed || 1)
 
     p.play()
     if (compositeCtx) {
@@ -3005,6 +3193,9 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
   const canvas = p.canvas!
   const animationName = store.selectedAnimation
   const fps = 60
+  const abLoop = getAbLoopRange()
+  const captureStartRatio = abLoop ? abLoop.start : 0
+  const captureEndRatio = abLoop ? abLoop.end : 1
 
   return new Promise(async resolve => {
     applyPlayerBackgroundTransparency(p)
@@ -3057,6 +3248,16 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
           state.apply(skeleton)
           skeleton.updateWorldTransform()
         }
+        if (abLoop) {
+          const trackIndex = getActiveTrackIndexForSelectedAnimation(state)
+          const entry = state.getCurrent(trackIndex)
+          if (entry && entry.animation && skeleton) {
+            entry.trackTime = entry.animationEnd * captureStartRatio
+            entry.nextTrackLast = entry.trackTime
+            state.apply(skeleton)
+            skeleton.updateWorldTransform()
+          }
+        }
         resetComposite()
       }
     }
@@ -3083,7 +3284,7 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
       if (simDuration > 0) {
         targetDuration = simDuration + stepDuration
       }
-      await startComposite(p, mapping, 0)
+      await startComposite(p, mapping, captureStartRatio * targetDuration)
       compositeDuration = targetDuration
       compositeLastTimestamp = null
       overlayLastTimestamp = null
@@ -3091,10 +3292,8 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
       renderCompositeOnce()
     }
 
-    const totalFrames = Math.max(
-      1,
-      mapping ? Math.max(1, simFrames + 1) : Math.ceil((targetDuration + EPS) / stepDuration),
-    )
+    const captureSpanSeconds = (captureEndRatio - captureStartRatio) * targetDuration
+    const totalFrames = Math.max(1, Math.ceil((captureSpanSeconds + EPS) / stepDuration))
     const zip = new JSZip()
     p.pause()
     store.playing = false
@@ -3145,8 +3344,10 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
         }
       }
 
+      const captureEndTime = captureEndRatio * targetDuration
+      const reachedCaptureEnd = compositeElapsed >= captureEndTime - EPS
       const finishedTracks = mapping ? compositeTracksReachedAnimEnd(p) : compositeTracksFinished(p)
-      const shouldStop = finishedTracks || compositeElapsed >= targetDuration - EPS || frame >= totalFrames
+      const shouldStop = reachedCaptureEnd || (!abLoop && finishedTracks) || frame >= totalFrames
       if (shouldStop) {
         if (!exportFinalized) {
           exportFinalized = true
@@ -3320,5 +3521,33 @@ defineExpose({ resetCamera, zoomIn, zoomOut, saveScreenshot, exportAnimation, ex
   left: -6px;
   transform: translate(-50%, 50%);
   cursor: nesw-resize;
+}
+.viewer-fullscreen {
+  background: #000;
+}
+.viewer-fullscreen.chrome-hidden {
+  cursor: none;
+}
+.fs-css-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.viewer-chrome-top,
+.viewer-chrome-bottom {
+  transition-property: translate, opacity;
+  transition-duration: 0.35s;
+  transition-timing-function: ease;
+  will-change: translate, opacity;
+}
+.chrome-hidden .viewer-chrome-top {
+  translate: 0 -16px;
+  opacity: 0;
+  pointer-events: none;
+}
+.chrome-hidden .viewer-chrome-bottom {
+  translate: 0 16px;
+  opacity: 0;
+  pointer-events: none;
 }
 </style>

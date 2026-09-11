@@ -29,7 +29,12 @@
             <option v-for="skin in skins" :key="skin" :value="skin">{{ skin }}</option>
           </select>
           <span>Animations</span>
-          <div class="overflow-y-auto sidebar-scroll flex-1">
+          <div
+            ref="animationListRef"
+            class="overflow-y-auto sidebar-scroll flex-1 outline-none focus:bg-gray-700/30"
+            tabindex="0"
+            @keydown="onAnimationListKeydown"
+          >
             <div
               v-for="name in animations"
               :key="name"
@@ -90,6 +95,45 @@
             class="flex-1"
           />
           <span class="w-12 text-right">{{ store.animationSpeed.toFixed(2) }}x</span>
+          <button
+            type="button"
+            class="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded bg-gray-700 hover:bg-gray-600 text-white transition-colors"
+            title="Reset animation speed to 1.00x"
+            @click="resetAnimationSpeed"
+          >
+            &#8634;
+          </button>
+        </div>
+      </div>
+      <div class="p-2">
+        <span>A-B Loop</span>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="flex-1 rounded shadow transition px-2 py-1.5 text-sm"
+            :class="abPointAActive ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-600 hover:bg-gray-500 text-white'"
+            :title="abPointATitle"
+            @click="setAbPoint('a')"
+          >
+            Set A
+          </button>
+          <button
+            type="button"
+            class="flex-1 rounded shadow transition px-2 py-1.5 text-sm"
+            :class="abPointBActive ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-600 hover:bg-gray-500 text-white'"
+            :title="abPointBTitle"
+            @click="setAbPoint('b')"
+          >
+            Set B
+          </button>
+          <button
+            type="button"
+            class="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded bg-gray-700 hover:bg-gray-600 text-white transition-colors"
+            title="Clear A-B points"
+            @click="resetAbLoop"
+          >
+            &#8634;
+          </button>
         </div>
       </div>
       <div class="p-2 gap-2 hidden lg:flex">
@@ -199,7 +243,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, toRefs, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, nextTick, toRefs, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useCharacterStore } from '@/stores/characterStore'
 
 import LoadingIcon from '@/components/icons/LoadingIcon.vue';
@@ -223,10 +267,65 @@ function select(name: string) {
   store.selectedAnimation = name
 }
 
+const animationListRef = ref<HTMLElement | null>(null)
+
+function onAnimationListKeydown(event: KeyboardEvent) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  event.preventDefault()
+
+  const list = animations.value
+  if (!list.length) return
+  const current = list.indexOf(store.selectedAnimation)
+  const nextIndex = current === -1
+    ? (event.key === 'ArrowDown' ? 0 : list.length - 1)
+    : event.key === 'ArrowDown'
+      ? Math.min(current + 1, list.length - 1)
+      : Math.max(current - 1, 0)
+
+  select(list[nextIndex])
+  void nextTick(() => {
+    const el = animationListRef.value?.children[nextIndex] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
 function onColorChange(e: Event) {
   const input = e.target as HTMLInputElement
   store.backgroundColor = input.value
 }
+
+function resetAnimationSpeed() {
+  store.animationSpeed = 1
+}
+
+function setAbPoint(point: 'a' | 'b') {
+  const value = Math.min(Math.max(store.playhead, 0), 1)
+  if (point === 'a') {
+    store.abLoopStart = value
+    if (store.abLoopEnd !== null && value > store.abLoopEnd) {
+      store.abLoopEnd = null
+    }
+  } else {
+    store.abLoopEnd = value
+    if (store.abLoopStart !== null && value < store.abLoopStart) {
+      store.abLoopStart = null
+    }
+  }
+}
+
+function resetAbLoop() {
+  store.abLoopStart = null
+  store.abLoopEnd = null
+}
+
+const abPointAActive = computed(() => store.abLoopStart !== null)
+const abPointBActive = computed(() => store.abLoopEnd !== null)
+const abPointATitle = computed(() =>
+  store.abLoopStart === null ? 'Set A at current position' : `A set at ${(store.abLoopStart * 100).toFixed(1)}%`,
+)
+const abPointBTitle = computed(() =>
+  store.abLoopEnd === null ? 'Set B at current position' : `B set at ${(store.abLoopEnd * 100).toFixed(1)}%`,
+)
 
 function onScreenshot() {
   emit('screenshot', transparentBg.value)
