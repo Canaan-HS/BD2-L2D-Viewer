@@ -131,6 +131,7 @@ import {
   type SkeletonData,
   type Skeleton as SpineSkeleton,
 } from '@esotericsoftware/spine-player'
+import { Output, WebMOutputFormat, BufferTarget, CanvasSource, Quality, canEncodeVideo } from 'mediabunny'
 import JSZip from 'jszip'
 
 import type { Animation, SceneRenderer, Slot } from '@esotericsoftware/spine-player'
@@ -310,7 +311,6 @@ const editButtonClasses = computed(() => [
 ])
 
 let player: SpinePlayer | null = null
-let recorder: MediaRecorder | null = null
 let cancelExport = false
 let exportingFrames = false
 let manualCamera: OrthoCamera | null = null
@@ -1704,13 +1704,18 @@ function drawCompositeFrame(
   sourceCanvas: HTMLCanvasElement,
   transparent: boolean,
 ) {
-  ctx.clearRect(0, 0, targetWidth, targetHeight)
+  ctx.save()
+  ctx.globalCompositeOperation = 'copy'
   if (!transparent) {
     ctx.fillStyle = normalizedBackgroundColor.value
     ctx.fillRect(0, 0, targetWidth, targetHeight)
     drawBackgroundOntoContext(ctx, targetWidth, targetHeight)
+    ctx.globalCompositeOperation = 'source-over'
+  } else {
+    ctx.clearRect(0, 0, targetWidth, targetHeight)
   }
   ctx.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight)
+  ctx.restore()
 }
 
 function getCompositeDataURL(canvasElement: HTMLCanvasElement, transparent: boolean) {
@@ -1724,6 +1729,17 @@ function getCompositeDataURL(canvasElement: HTMLCanvasElement, transparent: bool
   if (!ctx) return canvasElement.toDataURL('image/png')
   drawCompositeFrame(ctx, offscreen.width, offscreen.height, canvasElement, transparent)
   return offscreen.toDataURL('image/png')
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 const emit = defineEmits(['animations', 'skins', 'update:inspectMode', 'character-interaction'])
@@ -1880,12 +1896,6 @@ async function load() {
                   .finally(() => {
                     compositeRestarting = false
                   })
-              }
-              return
-            }
-            if (exportingAnimation && compositeDuration > 0 && compositeElapsed >= compositeDuration - 0.0001) {
-              if (recorder && recorder.state === 'recording') {
-                recorder.stop()
               }
               return
             }
@@ -2081,12 +2091,7 @@ async function load() {
   updateCanvasPointerEvents(player)
 }
 watch(() => store.selectedCharacterId, () => {
-  preloadSelectedCharacterAudio()
-  if (recorder && recorder.state === 'recording') {
-    cancelExport = true
-    recorder.stop()
-  }
-  if (exportingFrames) {
+  if (exportingAnimation) {
     cancelExport = true
   }
   resetComposite()
@@ -2096,11 +2101,7 @@ watch(() => store.selectedCharacterId, () => {
 
 watch(() => store.animationCategory, category => {
   if (category !== 'character') stopCharacterAudio()
-  if (recorder && recorder.state === 'recording') {
-    cancelExport = true
-    recorder.stop()
-  }
-  if (exportingFrames) {
+  if (exportingAnimation) {
     cancelExport = true
   }
   resetComposite()
@@ -2109,11 +2110,7 @@ watch(() => store.animationCategory, category => {
 
 watch(() => store.selectedAnimation, anim => {
   if (anim !== CHARACTER_IDLE_ANIMATION) stopCharacterAudio()
-  if (recorder && recorder.state === 'recording') {
-    cancelExport = true
-    recorder.stop()
-  }
-  if (exportingFrames) {
+  if (exportingAnimation) {
     cancelExport = true
   }
   progress.value = 0
@@ -2412,8 +2409,7 @@ function canTriggerCharacterMotion() {
     exportingFrames ||
     compositeActive ||
     forceTransparentClear ||
-    activePointerId !== null ||
-    (recorder !== null && recorder.state !== 'inactive')
+    activePointerId !== null
   ) {
     return false
   }
@@ -2777,8 +2773,22 @@ function saveScreenshot(transparent: boolean) {
   } else {
     ;(player as unknown as SpinePlayerInternal).drawFrame(false)
   }
-  requestAnimationFrame(() => {
-    const url = getCompositeDataURL(canvas, transparent)
+  try {
+    const screenshotCanvas = document.createElement('canvas')
+    screenshotCanvas.width = targetWidth
+    screenshotCanvas.height = targetHeight
+    const screenshotContext = screenshotCanvas.getContext('2d')
+    if (!screenshotContext) throw new Error('Could not create a screenshot canvas.')
+    drawCompositeFrame(screenshotContext, targetWidth, targetHeight, canvas, transparent)
+
+    screenshotCanvas.toBlob(blob => {
+      if (!blob) {
+        console.error('Could not encode the screenshot as a PNG.')
+        return
+      }
+      downloadBlob(blob, `screenshot_${store.selectedCharacterId}_${animationName}.png`)
+    }, 'image/png')
+  } finally {
     forceTransparentClear = false
     canvas.width = prevWidth
     canvas.height = prevHeight
@@ -2801,12 +2811,7 @@ function saveScreenshot(transparent: boolean) {
     } else {
       ;(player as unknown as SpinePlayerInternal).drawFrame(false)
     }
-
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `screenshot_${store.selectedCharacterId}_${animationName}.png`
-    a.click()
-  })
+  }
 }
 
 async function exportAnimation(transparent: boolean): Promise<void> {
@@ -2817,19 +2822,16 @@ async function exportAnimation(transparent: boolean): Promise<void> {
   stopCharacterAudio()
   cancelExport = false
   exportingAnimation = true
+  forceTransparentClear = transparent
 
   const canvas = p.canvas!
   const animationName = store.selectedAnimation
   const fps = 60
+  const stepSeconds = 1 / fps
+
   const prevPos = new Vector2(cam.position.x, cam.position.y)
   const prevZoom = cam.zoom
   const wasPlaying = store.playing
-  const state = p.animationState
-  const skeleton = p.skeleton
-  const animName = store.selectedAnimation
-  let mapping: CompiledComposite | null = null
-  let stream: MediaStream | null = null
-  let activeRecorder: MediaRecorder | null = null
 
   try {
     applyPlayerBackgroundTransparency(p)
@@ -2839,147 +2841,191 @@ async function exportAnimation(transparent: boolean): Promise<void> {
       cam.position.y = defaultCameraPos.y
       const paddedWidth = size.x
       const paddedHeight = size.y + 100
-      cam.zoom = Math.max(
-        paddedWidth / canvas.width,
-        paddedHeight / canvas.height,
-      )
+      cam.zoom = Math.max(paddedWidth / canvas.width, paddedHeight / canvas.height)
       cam.update()
     }
-    const mimeType =
-      ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(type =>
-        MediaRecorder.isTypeSupported(type),
-      )
-    const compositeCanvas = document.createElement('canvas')
-    compositeCanvas.width = canvas.width
-    compositeCanvas.height = canvas.height
-    const compositeCtx = compositeCanvas.getContext('2d')
-    if (compositeFrameHandle) {
-      cancelAnimationFrame(compositeFrameHandle)
-      compositeFrameHandle = null
-    }
-    stream = compositeCtx ? compositeCanvas.captureStream(fps) : canvas.captureStream(fps)
-    const recorderOptions: MediaRecorderOptions = {
-      videoBitsPerSecond: 10_000_000,
-    }
-    if (mimeType) recorderOptions.mimeType = mimeType
-    activeRecorder = new MediaRecorder(stream, recorderOptions)
-    recorder = activeRecorder
 
-    const chunks: BlobPart[] = []
+    const state = p.animationState
+    const skeleton = p.skeleton
     let duration = 3
     let timelineEnd = duration
-    mapping = getCompositeForAnimation(animName)
-    if (animName && state) {
+    let mapping: CompiledComposite | null = null
+
+    if (animationName && state) {
+      mapping = getCompositeForAnimation(animationName)
       if (mapping) {
         const info = await scheduleCompositeTimeline(p, mapping, 0)
         duration = info.duration
-        timelineEnd = info.duration || duration || 3
-        store.playing = true
+        timelineEnd = info.duration
         await startComposite(p, mapping, 0)
+        compositeLastTimestamp = null
+        overlayLastTimestamp = null
+        stopOverlayRendering()
+        timelineEnd = Math.max(getTracksEndDuration(p.animationState) || 0, duration)
       } else {
-        const anim = state.data.skeletonData.animations.find(
-          (a: Animation) => a.name === animName,
-        )
+        const anim = state.data.skeletonData.animations.find((a: Animation) => a.name === animationName)
         if (anim) duration = anim.duration
         timelineEnd = duration
         state.clearTrack(0)
         state.clearTrack(1)
-        setSpineAnimation(p, animName, { loop: true, forceNoMix: true })
+        setSpineAnimation(p, animationName, { loop: false, forceNoMix: true })
         if (skeleton) {
           state.apply(skeleton)
           skeleton.updateWorldTransform()
-          ;(p as unknown as SpinePlayerInternal).drawFrame(false)
         }
+        resetComposite()
       }
     }
 
-    const recordDuration = timelineEnd / (p.speed || store.animationSpeed || 1)
-
-    p.play()
-    if (compositeCtx) {
-      drawCompositeFrame(compositeCtx, compositeCanvas.width, compositeCanvas.height, canvas, transparent)
+    if (mapping) {
+      stopOverlayRendering()
+      renderCompositeOnce()
     }
 
-    const recordingComplete = new Promise<void>((resolve, reject) => {
-      let stopTimer: number | null = null
-      let stopWatchdog: number | null = null
-      const clearStopTimers = () => {
-        if (stopTimer !== null) window.clearTimeout(stopTimer)
-        if (stopWatchdog !== null) window.clearTimeout(stopWatchdog)
-      }
-      const stopRecording = () => {
-        if (activeRecorder?.state === 'recording') activeRecorder.stop()
-        stopWatchdog = window.setTimeout(() => {
-          reject(new Error('The browser did not finish the WebM recording.'))
-        }, 5_000)
-      }
+    const speed = p.speed || store.animationSpeed || 1
+    const stepDuration = stepSeconds * speed
+    let targetDuration = mapping ? compositeDuration || timelineEnd : timelineEnd
+    const prevCompositeDuration = compositeDuration
+    let simFrames = 0
+    const EPS = 1e-6
 
-      activeRecorder!.ondataavailable = e => {
-        if (e.data.size > 0) chunks.push(e.data)
+    if (mapping) {
+      const maxSimFrames = 2000
+      while (simFrames < maxSimFrames && !compositeTracksReachedAnimEnd(p)) {
+        advanceCompositeStates(stepSeconds)
+        simFrames++
       }
-      activeRecorder!.onerror = event => {
-        clearStopTimers()
-        const error = (event as Event & { error?: DOMException }).error
-        reject(error || new Error('The browser failed to record the WebM video.'))
-      }
-      activeRecorder!.onstop = () => {
-        clearStopTimers()
-        resolve()
-      }
+      const simDuration = simFrames * stepDuration
+      if (simDuration > 0) targetDuration = simDuration + stepDuration
 
-      activeRecorder!.start()
+      await startComposite(p, mapping, 0)
+      compositeDuration = targetDuration
+      compositeLastTimestamp = null
+      overlayLastTimestamp = null
+      stopOverlayRendering()
+      renderCompositeOnce()
+    }
 
-      if (compositeCtx) {
-        const renderComposite = () => {
-          if (activeRecorder?.state !== 'recording') return
-          if (compositeCanvas.width !== canvas.width || compositeCanvas.height !== canvas.height) {
-            compositeCanvas.width = canvas.width
-            compositeCanvas.height = canvas.height
-          }
-          drawCompositeFrame(compositeCtx, compositeCanvas.width, compositeCanvas.height, canvas, transparent)
-          compositeFrameHandle = requestAnimationFrame(renderComposite)
-        }
-        compositeFrameHandle = requestAnimationFrame(renderComposite)
+    const totalFrames = Math.max(
+      1,
+      mapping ? Math.max(1, simFrames + 1) : Math.ceil((targetDuration + EPS) / stepDuration)
+    )
+
+    const compositeCanvas = document.createElement('canvas')
+    compositeCanvas.width = canvas.width
+    compositeCanvas.height = canvas.height
+    const compositeCtx = compositeCanvas.getContext('2d')!
+
+    const quality = new Quality({ bitrate: 10_000_000 })
+    const encodingOptions = {
+      width: compositeCanvas.width,
+      height: compositeCanvas.height,
+      quality,
+      alpha: transparent ? 'keep' as const : 'discard' as const,
+    }
+    let codec: 'vp9' | 'vp8' | null = null
+    for (const candidate of ['vp9', 'vp8'] as const) {
+      if (await canEncodeVideo(candidate, encodingOptions)) {
+        codec = candidate
+        break
       }
+    }
+    if (!codec) throw new Error('This browser cannot encode a WebM video at the current size.')
 
-      stopTimer = window.setTimeout(stopRecording, Math.max(0, recordDuration * 1000))
+    const target = new BufferTarget()
+    const output = new Output({
+      format: new WebMOutputFormat(),
+      target,
     })
 
-    await recordingComplete
+    const videoSource = new CanvasSource(compositeCanvas, {
+      codec,
+      quality,
+      alpha: encodingOptions.alpha,
+    })
+
+    output.addVideoTrack(videoSource, { frameRate: fps })
+    await output.start()
+
+    p.pause()
+    store.playing = false
+
+    let frame = 0
+    while (frame < totalFrames && !cancelExport) {
+      if (mapping) {
+        renderCompositeOnce()
+      } else {
+        ;(p as unknown as SpinePlayerInternal).drawFrame(false)
+      }
+
+      drawCompositeFrame(compositeCtx, compositeCanvas.width, compositeCanvas.height, canvas, transparent)
+
+      const timestampInSeconds = frame * stepSeconds
+      await videoSource.add(timestampInSeconds, stepSeconds)
+
+      frame++
+
+      if (mapping) {
+        advanceCompositeStates(stepSeconds)
+        if (compositeElapsed > targetDuration) compositeElapsed = targetDuration
+        progress.value = compositeDuration > 0 ? Math.min(compositeElapsed / compositeDuration, 1) : 0
+      } else {
+        p.animationState?.update(stepDuration)
+        p.animationState?.apply(p.skeleton!)
+        p.skeleton!.updateWorldTransform()
+        compositeElapsed = frame * stepDuration
+
+        const entry = p.animationState?.getCurrent(getActiveTrackIndexForSelectedAnimation(p.animationState))
+        const entryDuration = entry?.animation?.duration ?? 0
+        if (entryDuration > 0) {
+          progress.value = Math.min((entry?.trackTime ?? 0) / entryDuration, 1)
+        }
+      }
+
+      const finishedTracks = mapping ? compositeTracksReachedAnimEnd(p) : compositeTracksFinished(p)
+      if (finishedTracks || compositeElapsed >= targetDuration - EPS) {
+        break
+      }
+
+      if (frame % 5 === 0) {
+        await new Promise(resolve => requestAnimationFrame(resolve))
+      }
+    }
 
     if (!cancelExport) {
-      const recordedMimeType = activeRecorder.mimeType || mimeType || 'video/webm'
-      const blob = new Blob(chunks, { type: recordedMimeType })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `animation_${store.selectedCharacterId}_${animationName}.webm`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
+      await output.finalize()
+      const buffer = target.buffer
+      if (buffer) {
+        const blob = new Blob([buffer], { type: 'video/webm' })
+        downloadBlob(blob, `animation_${store.selectedCharacterId}_${animationName}.webm`)
+      }
+    }
+
+    if (mapping) {
+      compositeDuration = prevCompositeDuration
     }
   } finally {
-    if (activeRecorder?.state !== 'inactive') {
-      activeRecorder?.stop()
-    }
-    stream?.getTracks().forEach(track => track.stop())
+	  forceTransparentClear = false
     applyPlayerBackgroundTransparency(p)
-    if (compositeFrameHandle) {
-      cancelAnimationFrame(compositeFrameHandle)
-      compositeFrameHandle = null
-    }
     if (!store.useCurrentCamera) {
       cam.position.x = prevPos.x
       cam.position.y = prevPos.y
       cam.zoom = prevZoom
       cam.update()
     }
+    progress.value = 0
+    compositeElapsed = 0
+
+    const animName = store.selectedAnimation
+    const mapping = animName ? getCompositeForAnimation(animName) : null
     if (mapping) {
       void startComposite(p, mapping, 0)
     } else if (animName) {
       setSpineAnimation(p, animName, { loop: true })
+      p.animationState?.apply(p.skeleton!)
+      p.skeleton!.updateWorldTransform()
     }
+
     if (wasPlaying) {
       p.play()
     } else {
@@ -2987,7 +3033,6 @@ async function exportAnimation(transparent: boolean): Promise<void> {
     }
     store.playing = wasPlaying
     exportingAnimation = false
-    if (recorder === activeRecorder) recorder = null
     cancelExport = false
   }
 }
@@ -3001,6 +3046,7 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
   cancelExport = false
   exportingFrames = true
   exportingAnimation = true
+  forceTransparentClear = transparent
 
   const canvas = p.canvas!
   const animationName = store.selectedAnimation
@@ -3105,6 +3151,7 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
       if (cancelExport) {
         exportingFrames = false
         exportingAnimation = false
+		    forceTransparentClear = false
         applyPlayerBackgroundTransparency(p)
         if (!store.useCurrentCamera) {
           cam.position.x = prevPos.x
@@ -3157,14 +3204,11 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
           finalize()
           zip.generateAsync({ type: 'blob' })
             .then((blob: Blob) => {
-              const url = URL.createObjectURL(blob)
-              const a = document.createElement('a')
-              a.href = url
-              a.download = `animation_${store.selectedCharacterId}_${animationName}_frames.zip`
-              a.click()
-              URL.revokeObjectURL(url)
+              downloadBlob(blob, `animation_${store.selectedCharacterId}_${animationName}_frames.zip`)
             })
-            .catch(() => {})
+            .catch(error => {
+              console.error('Failed to create animation frame ZIP:', error)
+            })
             .finally(() => {
               resolve()
             })
@@ -3178,6 +3222,7 @@ function exportAnimationFrames(transparent: boolean): Promise<void> {
     const finalize = () => {
       exportingFrames = false
       exportingAnimation = false
+	    forceTransparentClear = false
       applyPlayerBackgroundTransparency(p)
       if (!store.useCurrentCamera) {
         cam.position.x = prevPos.x
