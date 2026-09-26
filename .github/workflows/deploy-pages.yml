@@ -7,7 +7,6 @@ on:
       - main
     paths-ignore:
       - ".github/**"
-      - "scripts/upstream-sync.js"
 
 permissions:
   contents: read
