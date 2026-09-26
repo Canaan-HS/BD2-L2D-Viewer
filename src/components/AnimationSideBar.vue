@@ -63,6 +63,8 @@
             v-for="layer in filteredLayers"
             :key="layer.key"
             class="flex items-center gap-2 py-1 px-2 rounded cursor-pointer hover:bg-gray-700"
+            @mouseenter="store.setPreviewLayer(layer.key)"
+            @mouseleave="store.setPreviewLayer(null)"
           >
             <input
               type="checkbox"
@@ -396,6 +398,10 @@ function toggleLayer(name: string) {
 
 watch(() => store.animationCategory, () => {
   emit('category-change');
+});
+
+watch(sidebarTab, () => {
+  store.setPreviewLayer(null);
 });
 
 onMounted(() => document.addEventListener('click', handleClickOutside))

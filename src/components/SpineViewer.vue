@@ -110,7 +110,13 @@
           @pointerdown.stop.prevent="event => onResizeHandlePointerDown(handle, event as PointerEvent)"
         />
       </div>
-      <div ref="container" class="absolute inset-0 z-10" @pointerdown="onViewerPointerDown"></div>
+      <div
+        ref="container"
+        class="absolute inset-0 z-10"
+        @pointerdown="onViewerPointerDown"
+        @pointermove="onViewerPointerMove"
+        @pointerleave="onViewerPointerLeave"
+      ></div>
       <canvas ref="overlayCanvas" class="absolute inset-0 z-20 pointer-events-none"></canvas>
     </div>
     <div
@@ -1824,6 +1830,8 @@ watch(inspectMode, requestViewerRedraw)
 watch(editingBackground, value => {
   if (!value) {
     stopPointerTracking()
+  } else {
+    store.setPreviewLayer(null)
   }
   updateCanvasPointerEvents()
 })
@@ -1887,6 +1895,7 @@ async function load() {
   if (!char) return
   store.layerNames = []
   store.layerVisibility = {}
+  store.setPreviewLayer(null)
 
   const ANIMATION_TYPE_BASE_PATH = {
     character: char.spine,
@@ -2305,7 +2314,14 @@ watch(() => store.backgroundColor, () => {
 watch(() => store.layerSelectionEnabled, enabled => {
   if (!enabled) {
     store.selectedLayerName = null
+    store.setPreviewLayer(null)
+  } else {
+    ensureHoverOverlayLoop()
   }
+})
+
+watch(() => store.previewLayerName, () => {
+  ensureHoverOverlayLoop()
 })
 
 watch(showingMobileOverlay, value => {
@@ -2621,20 +2637,16 @@ function startCharacterClickTracking(event: PointerEvent) {
   window.addEventListener('pointercancel', onCharacterClickPointerCancel, true)
 }
 
-function onViewerPointerDown(e: PointerEvent) {
-  if (!player || editingBackground.value) return
-  if (e.button !== 0) return
+let pickScratch = new Float32Array(0)
 
-  if (!store.layerSelectionEnabled) {
-    startCharacterClickTracking(e)
-    return
-  }
+function pickLayerAt(clientX: number, clientY: number): string | null {
+  if (!player) return null
 
-  const worldPoint = getWorldPoint(e.clientX, e.clientY)
-  if (!worldPoint) return
+  const worldPoint = getWorldPoint(clientX, clientY)
+  if (!worldPoint) return null
 
   const slots = player.skeleton?.drawOrder
-  if (!slots) return
+  if (!slots) return null
 
   for (let i = slots.length - 1; i >= 0; i--) {
     const slot = slots[i] as unknown as SpineSlot
@@ -2644,19 +2656,162 @@ function onViewerPointerDown(e: PointerEvent) {
     const vertexCount = attachment?.worldVerticesLength ?? 0
 
     if (attachment && vertexCount > 0 && typeof attachment.computeWorldVertices === 'function') {
-      const worldVertices = new Float32Array(vertexCount)
-      attachment.computeWorldVertices(slot as Slot, 0, vertexCount, worldVertices, 0, 2)
-      if (isPointInPolygon(worldPoint.x, worldPoint.y, worldVertices)) {
-        if (store.selectedLayerName !== slot.data.name) {
-          store.selectedLayerName = slot.data.name
-        } else {
-          store.selectedLayerName = null
-        }
-        return
+      if (pickScratch.length < vertexCount) pickScratch = new Float32Array(vertexCount)
+      attachment.computeWorldVertices(slot as Slot, 0, vertexCount, pickScratch, 0, 2)
+      if (isPointInPolygon(worldPoint.x, worldPoint.y, pickScratch.subarray(0, vertexCount))) {
+        return slot.data.name
       }
     }
   }
-  store.selectedLayerName = null
+
+  return null
+}
+
+function onViewerPointerDown(e: PointerEvent) {
+  if (!player || editingBackground.value) return
+  if (e.button !== 0) return
+
+  if (!store.layerSelectionEnabled) {
+    startCharacterClickTracking(e)
+    return
+  }
+
+  const picked = pickLayerAt(e.clientX, e.clientY)
+  store.selectedLayerName = store.selectedLayerName === picked ? null : picked
+}
+
+let hoverPointerInside = false
+let hoverPointerX = 0
+let hoverPointerY = 0
+let hoverPickHandle: number | null = null
+
+function onViewerPointerMove(e: PointerEvent) {
+  if (!store.layerSelectionEnabled || !player || editingBackground.value) return
+  if (e.pointerType === 'touch') return
+
+  hoverPointerInside = true
+  hoverPointerX = e.clientX
+  hoverPointerY = e.clientY
+  ensureHoverOverlayLoop()
+
+  if (hoverPickHandle !== null) return
+  hoverPickHandle = requestAnimationFrame(() => {
+    hoverPickHandle = null
+    if (!hoverPointerInside) return
+    store.setPreviewLayer(pickLayerAt(hoverPointerX, hoverPointerY))
+  })
+}
+
+function onViewerPointerLeave() {
+  hoverPointerInside = false
+  store.setPreviewLayer(null)
+}
+
+let hoverOverlayHandle: number | null = null
+
+function shouldRunHoverOverlayLoop() {
+  return store.layerSelectionEnabled || store.previewLayerName !== null
+}
+
+function ensureHoverOverlayLoop() {
+  if (hoverOverlayHandle !== null) return
+  hoverOverlayHandle = requestAnimationFrame(function step() {
+    drawOverlay()
+    const keepGoing = shouldRunHoverOverlayLoop() && !(compositeActive && overlayInstances.length > 0)
+    hoverOverlayHandle = keepGoing ? requestAnimationFrame(step) : null
+  })
+}
+
+function stopHoverOverlayLoop() {
+  if (hoverPickHandle !== null) {
+    cancelAnimationFrame(hoverPickHandle)
+    hoverPickHandle = null
+  }
+  if (hoverOverlayHandle === null) return
+  cancelAnimationFrame(hoverOverlayHandle)
+  hoverOverlayHandle = null
+}
+
+let outlineScratch = new Float32Array(0)
+
+type LayerOutlineStyle = {
+  stroke: string
+  fill: string
+  dash: number[]
+  allowHidden: boolean
+}
+
+const LAYER_OUTLINE_LOCKED: LayerOutlineStyle = {
+  stroke: '#818cf8', // indigo-400
+  fill: 'rgba(79, 70, 229, 0.4)', // indigo-600 with opacity
+  dash: [],
+  allowHidden: false,
+}
+
+const LAYER_OUTLINE_PREVIEW: LayerOutlineStyle = {
+  stroke: '#c7d2fe', // indigo-200
+  fill: 'rgba(199, 210, 254, 0.25)',
+  dash: [6, 4],
+  allowHidden: true,
+}
+
+const LAYER_OUTLINE_PREVIEW_HIDDEN: LayerOutlineStyle = {
+  stroke: '#c7d2fe',
+  fill: 'rgba(199, 210, 254, 0.45)',
+  dash: [2, 3],
+  allowHidden: true,
+}
+
+function strokeLayerOutline(
+  name: string,
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  style: LayerOutlineStyle,
+) {
+  if (!player) return
+  const skeleton = player.skeleton
+  if (!skeleton) return
+
+  const slots = skeleton.slots as unknown as SpineSlot[]
+  const slot = slots.find(s => s.data.name === name)
+  if (!slot) return
+  if (!style.allowHidden && store.layerVisibility[name] === false) return
+
+  const attachment = slot.getAttachment?.() as VertexAttachment | undefined
+  const vertexCount = attachment?.worldVerticesLength ?? 0
+  if (!attachment || vertexCount <= 0 || typeof attachment.computeWorldVertices !== 'function') return
+
+  const camState = getCameraState()
+  if (!camState) return
+  const { cx, cy, zoom, vw, vh } = camState
+
+  if (outlineScratch.length < vertexCount) outlineScratch = new Float32Array(vertexCount)
+  attachment.computeWorldVertices(slot as Slot, 0, vertexCount, outlineScratch, 0, 2)
+  const worldVertices = outlineScratch.subarray(0, vertexCount)
+
+  ctx.beginPath()
+  for (let i = 0; i < vertexCount; i += 2) {
+    const wx = worldVertices[i]
+    const wy = worldVertices[i+1]
+
+    const nx = ((wx - cx) / zoom) / (vw / 2)
+    const ny = ((wy - cy) / zoom) / (vh / 2)
+
+    const screenX = (nx + 1) * 0.5 * canvas.width
+    const screenY = (1 - (ny + 1) * 0.5) * canvas.height
+
+    if (i === 0) ctx.moveTo(screenX, screenY)
+    else ctx.lineTo(screenX, screenY)
+  }
+  ctx.closePath()
+  ctx.setLineDash(style.dash)
+  ctx.strokeStyle = style.stroke
+  ctx.lineWidth = 2
+  ctx.lineJoin = 'round'
+  ctx.stroke()
+  ctx.fillStyle = style.fill
+  ctx.fill()
+  ctx.setLineDash([])
 }
 
 function drawOverlay() {
@@ -2673,47 +2828,19 @@ function drawOverlay() {
   if (!ctx) return
   ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-  const selectedLayer = store.selectedLayerName
-  if (!selectedLayer || !store.layerSelectionEnabled) return
+  const locked = store.selectedLayerName
+  const preview = store.previewLayerName
 
-  const skeleton = player.skeleton
-  if (!skeleton) return
+  if (locked) strokeLayerOutline(locked, ctx, canvas, LAYER_OUTLINE_LOCKED)
 
-  const slots = skeleton.slots as unknown as SpineSlot[]
-  const slot = slots.find(s => s.data.name === selectedLayer)
-  if (!slot || store.layerVisibility[selectedLayer] === false) return
-
-  const attachment = slot.getAttachment?.() as VertexAttachment | undefined
-  const vertexCount = attachment?.worldVerticesLength ?? 0
-  if (attachment && vertexCount > 0 && typeof attachment.computeWorldVertices === 'function') {
-    const worldVertices = new Float32Array(vertexCount)
-    attachment.computeWorldVertices(slot as Slot, 0, vertexCount, worldVertices, 0, 2)
-
-    const camState = getCameraState()
-    if (!camState) return
-    const { cx, cy, zoom, vw, vh } = camState
-
-    ctx.beginPath()
-    for (let i = 0; i < worldVertices.length; i += 2) {
-       const wx = worldVertices[i]
-       const wy = worldVertices[i+1]
-
-       const nx = ((wx - cx) / zoom) / (vw / 2)
-       const ny = ((wy - cy) / zoom) / (vh / 2)
-
-       const screenX = (nx + 1) * 0.5 * canvas.width
-       const screenY = (1 - (ny + 1) * 0.5) * canvas.height
-
-       if (i === 0) ctx.moveTo(screenX, screenY)
-       else ctx.lineTo(screenX, screenY)
-    }
-    ctx.closePath()
-    ctx.strokeStyle = '#818cf8' // indigo-400
-    ctx.lineWidth = 2
-    ctx.lineJoin = 'round'
-    ctx.stroke()
-    ctx.fillStyle = 'rgba(79, 70, 229, 0.4)' // indigo-600 with opacity
-    ctx.fill()
+  if (preview && preview !== locked) {
+    const hidden = store.layerVisibility[preview] === false
+    strokeLayerOutline(
+      preview,
+      ctx,
+      canvas,
+      hidden ? LAYER_OUTLINE_PREVIEW_HIDDEN : LAYER_OUTLINE_PREVIEW,
+    )
   }
 }
 
@@ -2731,7 +2858,7 @@ function onKeyDown(e: KeyboardEvent) {
     if (store.hiddenLayerStack.length > 0) {
       const last = store.hiddenLayerStack.pop()!
       store.layerVisibility[last] = true
-      store.selectedLayerName = last
+      if (store.layerSelectionEnabled) store.selectedLayerName = last
     }
   } else if (e.key === 'Escape') {
     while (store.hiddenLayerStack.length > 0) {
@@ -2829,6 +2956,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   clearChromeHideTimer()
   clearCharacterClickTracking()
+  stopHoverOverlayLoop()
   clearCharacterAudioPool()
   stopPointerTracking()
   resetComposite()
