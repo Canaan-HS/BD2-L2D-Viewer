@@ -59,15 +59,14 @@ jobs:
             await core.summary
               .addHeading('上游同步檢查')
               .addTable([
-                { data: '項目', header: true },
-                { data: '上游', header: true },
-                { data: process.env.UPSTREAM_REPO, header: true },
-                { data: '落後', header: true },
-                { data: `${data.behind_by} 個 commit`, header: true },
-                { data: '領先', header: true },
-                { data: `${data.ahead_by} 個 commit`, header: true },
-                { data: '比較頁', header: true },
-                { data: data.html_url, header: true },
+                [
+                  { data: '項目', header: true },
+                  { data: '內容', header: true },
+                ],
+                [{ data: '上游' }, { data: process.env.UPSTREAM_REPO }],
+                [{ data: '落後' }, { data: `${data.behind_by} 個 commit` }],
+                [{ data: '領先' }, { data: `${data.ahead_by} 個 commit` }],
+                [{ data: '比較頁' }, { data: data.html_url }],
               ])
               .write()
 
