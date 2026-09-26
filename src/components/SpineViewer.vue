@@ -1839,6 +1839,9 @@ watch(editingBackground, value => {
 watch(
   () => store.layerVisibility,
   () => {
+    if (store.selectedLayerName && store.layerVisibility[store.selectedLayerName] === false) {
+      store.selectedLayerName = null
+    }
     if (!player || !player.skeleton || !player.animationState) return
     const skeleton = player.skeleton
     player.animationState.apply(skeleton)
