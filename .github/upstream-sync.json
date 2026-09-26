@@ -1,0 +1,10 @@
+{
+  "upstream_repo": "Jelosus2/BD2-L2D-Viewer",
+  "upstream_ref": "main",
+  "allow": [
+    "src/assets/**",
+    "src/utils/character_list.ts",
+    "src/utils/changelog.ts",
+    "src/utils/cutscene_mappings.ts"
+  ]
+}
