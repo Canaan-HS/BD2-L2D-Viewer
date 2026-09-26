@@ -1,0 +1,54 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 台灣時間 00:00 (UTC+8) = UTC 16:00
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Compare upstream and apply allow-listed files
+        id: sync
+        run: node scripts/upstream-sync.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Commit and push allow-listed updates
+        if: steps.sync.outputs.has-changes == 'true'
+        run: |
+          git config user.name "Canaan-HS"
+          git config user.email "s3459897@gmail.com"
+          git commit -m "auto update"
+          git push origin HEAD:main
+
+      - name: Deploy GitHub Pages
+        if: steps.sync.outputs.has-changes == 'true' && steps.sync.outputs.needs-review == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy-pages.yml --ref main --repo ${{ github.repository }}
+
+      - name: Stop for manual review
+        if: steps.sync.outputs.needs-review == 'true'
+        run: |
+          echo "::error title=需要人工審查::上游有自動更新規則外的變更,或本倉庫改過同名檔案。允許範圍內的檔案已推送,其餘請依上方 log 清單自行取得並替換。"
+          exit 1
