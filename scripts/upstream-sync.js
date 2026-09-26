@@ -86,7 +86,6 @@ async function fetchJson(path) {
   const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
   const response = await fetch(`https://api.github.com${path}`, {
     headers: {
-      Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
@@ -188,6 +187,22 @@ function hasStagedChanges() {
   return git(['diff', '--cached', '--name-only']).trim().length > 0
 }
 
+function mergeUpstreamHistory() {
+  git(['merge', '-s', 'ours', '--no-commit', '--no-ff', UPSTREAM_REF])
+}
+
+function abortUpstreamMerge() {
+  git(['merge', '--abort'])
+}
+
+function resetInProgressMerge() {
+  // 讓腳本可重入:若上次執行留下未完成的 merge(例如 workflow 的 commit 步驟失敗),
+  // 先撤銷再重新推導,避免 git merge 因 MERGE_HEAD 殘留而中止。
+  if (tryGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']) !== null) {
+    abortUpstreamMerge()
+  }
+}
+
 function describeChange(change) {
   const label = STATUS_LABELS[change.status] ?? change.status
   const from = change.previous ? ` ← ${change.previous}` : ''
@@ -234,6 +249,7 @@ function publish(lines, outputs) {
 }
 
 async function main() {
+  resetInProgressMerge()
   const config = loadConfig()
   const [owner = ''] = (process.env.GITHUB_REPOSITORY ?? '').split('/')
 
@@ -259,10 +275,14 @@ async function main() {
     config.matchers,
   )
 
+  mergeUpstreamHistory()
   applyChanges(classified.applied)
 
+  const hasChanges = hasStagedChanges()
+  if (!hasChanges) abortUpstreamMerge()
+
   publish(summary(classified), {
-    'has-changes': String(hasStagedChanges()),
+    'has-changes': String(hasChanges),
     'needs-review': String(classified.pendingReview.length > 0),
   })
 }
