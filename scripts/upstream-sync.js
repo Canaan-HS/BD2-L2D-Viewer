@@ -196,8 +196,6 @@ function abortUpstreamMerge() {
 }
 
 function resetInProgressMerge() {
-  // 讓腳本可重入:若上次執行留下未完成的 merge(例如 workflow 的 commit 步驟失敗),
-  // 先撤銷再重新推導,避免 git merge 因 MERGE_HEAD 殘留而中止。
   if (tryGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']) !== null) {
     abortUpstreamMerge()
   }
@@ -278,12 +276,10 @@ async function main() {
   mergeUpstreamHistory()
   applyChanges(classified.applied)
 
-  const hasChanges = hasStagedChanges()
-  if (!hasChanges) abortUpstreamMerge()
-
   publish(summary(classified), {
-    'has-changes': String(hasChanges),
+    'has-changes': String(hasStagedChanges()),
     'needs-review': String(classified.pendingReview.length > 0),
+    'history-updated': 'true',
   })
 }
 
