@@ -30,7 +30,6 @@ jobs:
             echo "::error title=缺少 SYNC_TOKEN::請到 Settings → Secrets and variables → Actions → New repository secret 建立「SYNC_TOKEN」,內容為 fine-grained token,權限勾選 Contents: Read and write 與 Pull requests: Read and write。"
             exit 1
           fi
-          echo "SYNC_TOKEN 已設定"
 
       - name: Compare with upstream
         id: compare
@@ -56,20 +55,6 @@ jobs:
             core.setOutput('ahead_by', String(data.ahead_by))
             core.setOutput('compare_url', data.html_url)
 
-            await core.summary
-              .addHeading('上游同步檢查')
-              .addTable([
-                [
-                  { data: '項目', header: true },
-                  { data: '內容', header: true },
-                ],
-                [{ data: '上游' }, { data: process.env.UPSTREAM_REPO }],
-                [{ data: '落後' }, { data: `${data.behind_by} 個 commit` }],
-                [{ data: '領先' }, { data: `${data.ahead_by} 個 commit` }],
-                [{ data: '比較頁' }, { data: data.html_url }],
-              ])
-              .write()
-
       - name: Merge upstream via GitHub native sync
         id: merge
         if: steps.compare.outputs.behind_by != '0'
@@ -79,40 +64,31 @@ jobs:
           script: |
             const { owner, repo } = context.repo
             let result = 'unknown'
-            let mergeSha = ''
 
             try {
-              const { data } = await github.request(
+              await github.request(
                 'POST /repos/{owner}/{repo}/merge-upstream',
                 { owner, repo, branch: 'main', merge_method: 'merge' },
               )
               result = 'merged'
-              mergeSha = data.sha ?? ''
             } catch (err) {
               if (err.status === 409) {
                 result = 'conflict'
               } else if (err.status === 422) {
                 result = 'noop'
               } else {
-                await core.summary
-                  .addHeading('同步失敗')
-                  .addRaw(`HTTP ${err.status}: ${err.message}`)
-                  .write()
                 core.setFailed(`merge-upstream 失敗:HTTP ${err.status} ${err.message}`)
                 return
               }
             }
 
-            core.info(`merge-upstream 結果:${result}${mergeSha ? ` (${mergeSha})` : ''}`)
             core.setOutput('result', result)
-            core.setOutput('merge_sha', mergeSha)
 
       - name: Verify merge was recorded
         if: steps.merge.outputs.result == 'merged'
         uses: actions/github-script@v7
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
-          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
         with:
           github-token: ${{ secrets.SYNC_TOKEN }}
           script: |
@@ -129,27 +105,10 @@ jobs:
             )
 
             if (data.behind_by !== 0) {
-              await core.summary
-                .addHeading('合併後驗證失敗')
-                .addRaw(
-                  `合併後仍落後 ${data.behind_by} 個 commit。` +
-                    `這代表 merge commit 沒有建立,請手動檢查。`,
-                )
-                .write()
-              core.setFailed(`合併後驗證失敗:仍落後 ${data.behind_by} 個 commit`)
-              return
-            }
-
-            const sha = process.env.MERGE_SHA
-            await core.summary
-              .addHeading('自動合併完成')
-              .addRaw(
-                `- 落後數已驗證為 **0**\n` +
-                  (sha ? `- merge commit:\`${sha}\`\n` : '') +
-                  `- merge commit 由 \`${context.actor}\` 建立\n` +
-                  `- GitHub Pages 部署會由這次 push 自動觸發`,
+              core.setFailed(
+                `合併後驗證失敗:仍落後 ${data.behind_by} 個 commit,merge commit 可能沒有建立`,
               )
-              .write()
+            }
 
       - name: Open or update review pull request
         if: steps.merge.outputs.result == 'conflict'
@@ -200,11 +159,7 @@ jobs:
                 'PATCH /repos/{owner}/{repo}/pulls/{pull_number}',
                 { owner, repo, pull_number: open[0].number, title, body },
               )
-              core.info(`已更新既有 PR #${pr.number}`)
-              await core.summary
-                .addHeading('已移交人工審查')
-                .addRaw(`- PR #${pr.number} 已更新`)
-                .write()
+              core.info(`已更新既有 PR #${pr.number},請解決衝突後合併`)
               return
             }
 
@@ -221,18 +176,7 @@ jobs:
                   maintainer_can_modify: true,
                 },
               )
-              core.info(`已建立 PR #${pr.number}`)
-              await core.summary
-                .addHeading('已移交人工審查')
-                .addRaw(`- PR #${pr.number} 已建立,請解決衝突後合併。`)
-                .write()
+              core.info(`已建立審查 PR #${pr.number},請解決衝突後合併`)
             } catch (err) {
-              await core.summary
-                .addHeading('無法建立審查 PR')
-                .addRaw(
-                  `跨 fork PR 建立失敗（head=\`${head}\`,HTTP ${err.status}）。\n\n` +
-                    `這是預期外的結果,請回報以便改用固定分支方案。`,
-                )
-                .write()
               core.setFailed(`無法建立跨 fork PR:HTTP ${err.status} ${err.message}`)
             }
