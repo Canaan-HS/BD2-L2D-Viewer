@@ -50,5 +50,5 @@ jobs:
       - name: Stop for manual review
         if: steps.sync.outputs.needs-review == 'true'
         run: |
-          echo "::error title=需要人工審查::上游有自動更新規則外的變更,或本倉庫改過同名檔案。允許範圍內的檔案已推送,其餘請依上方 log 清單自行取得並替換。"
+          echo "::error title=需要人工審查::上游有規則外的變更"
           exit 1
