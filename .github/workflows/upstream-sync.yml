@@ -7,48 +7,233 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: write
+  pull-requests: write
 
 concurrency:
   group: upstream-sync
   cancel-in-progress: false
 
+env:
+  UPSTREAM_REPO: Jelosus2/BD2-L2D-Viewer
+  REVIEW_TITLE: 同步更新審查
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
-      - name: Compare upstream and apply allow-listed files
-        id: sync
-        run: node scripts/upstream-sync.js
+      - name: Check SYNC_TOKEN is configured
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-
-      - name: Commit upstream history and allow-listed updates
-        if: steps.sync.outputs.has-changes == 'true' || steps.sync.outputs.history-updated == 'true'
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          git config user.name "Canaan-HS"
-          git config user.email "s3459897@gmail.com"
-          git commit -m "auto update"
-          git push origin HEAD:main
+          if [ -z "${SYNC_TOKEN}" ]; then
+            echo "::error title=缺少 SYNC_TOKEN::請到 Settings → Secrets and variables → Actions → New repository secret 建立「SYNC_TOKEN」,內容為 fine-grained token,權限勾選 Contents: Read and write 與 Pull requests: Read and write。"
+            exit 1
+          fi
+          echo "SYNC_TOKEN 已設定"
 
-      - name: Deploy GitHub Pages
-        if: steps.sync.outputs.has-changes == 'true' && steps.sync.outputs.needs-review == 'false'
+      - name: Compare with upstream
+        id: compare
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run deploy-pages.yml --ref main --repo ${{ github.repository }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const [upOwner, upRepo] = process.env.UPSTREAM_REPO.split('/')
+            const { owner, repo } = context.repo
 
-      - name: Stop for manual review
-        if: steps.sync.outputs.needs-review == 'true'
-        run: |
-          echo "::error title=需要人工審查::上游有規則外的變更"
-          exit 1
+            const { data } = await github.request(
+              'GET /repos/{owner}/{repo}/compare/{basehead}',
+              {
+                owner: upOwner,
+                repo: upRepo,
+                basehead: `main...${owner}:main`,
+              },
+            )
+
+            core.setOutput('behind_by', String(data.behind_by))
+            core.setOutput('ahead_by', String(data.ahead_by))
+            core.setOutput('compare_url', data.html_url)
+
+            await core.summary
+              .addHeading('上游同步檢查')
+              .addTable([
+                { data: '項目', header: true },
+                { data: '上游', header: true },
+                { data: process.env.UPSTREAM_REPO, header: true },
+                { data: '落後', header: true },
+                { data: `${data.behind_by} 個 commit`, header: true },
+                { data: '領先', header: true },
+                { data: `${data.ahead_by} 個 commit`, header: true },
+                { data: '比較頁', header: true },
+                { data: data.html_url, header: true },
+              ])
+              .write()
+
+      - name: Merge upstream via GitHub native sync
+        id: merge
+        if: steps.compare.outputs.behind_by != '0'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo
+            let result = 'unknown'
+            let mergeSha = ''
+
+            try {
+              const { data } = await github.request(
+                'POST /repos/{owner}/{repo}/merge-upstream',
+                { owner, repo, branch: 'main', merge_method: 'merge' },
+              )
+              result = 'merged'
+              mergeSha = data.sha ?? ''
+            } catch (err) {
+              if (err.status === 409) {
+                result = 'conflict'
+              } else if (err.status === 422) {
+                result = 'noop'
+              } else {
+                await core.summary
+                  .addHeading('同步失敗')
+                  .addRaw(`HTTP ${err.status}: ${err.message}`)
+                  .write()
+                core.setFailed(`merge-upstream 失敗:HTTP ${err.status} ${err.message}`)
+                return
+              }
+            }
+
+            core.info(`merge-upstream 結果:${result}${mergeSha ? ` (${mergeSha})` : ''}`)
+            core.setOutput('result', result)
+            core.setOutput('merge_sha', mergeSha)
+
+      - name: Verify merge was recorded
+        if: steps.merge.outputs.result == 'merged'
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const [upOwner, upRepo] = process.env.UPSTREAM_REPO.split('/')
+            const { owner, repo } = context.repo
+
+            const { data } = await github.request(
+              'GET /repos/{owner}/{repo}/compare/{basehead}',
+              {
+                owner: upOwner,
+                repo: upRepo,
+                basehead: `main...${owner}:main`,
+              },
+            )
+
+            if (data.behind_by !== 0) {
+              await core.summary
+                .addHeading('合併後驗證失敗')
+                .addRaw(
+                  `合併後仍落後 ${data.behind_by} 個 commit。` +
+                    `這代表 merge commit 沒有建立,請手動檢查。`,
+                )
+                .write()
+              core.setFailed(`合併後驗證失敗:仍落後 ${data.behind_by} 個 commit`)
+              return
+            }
+
+            const sha = process.env.MERGE_SHA
+            await core.summary
+              .addHeading('自動合併完成')
+              .addRaw(
+                `- 落後數已驗證為 **0**\n` +
+                  (sha ? `- merge commit:\`${sha}\`\n` : '') +
+                  `- merge commit 由 \`${context.actor}\` 建立\n` +
+                  `- GitHub Pages 部署會由這次 push 自動觸發`,
+              )
+              .write()
+
+      - name: Open or update review pull request
+        if: steps.merge.outputs.result == 'conflict'
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          REVIEW_TITLE: ${{ env.REVIEW_TITLE }}
+          BEHIND_BY: ${{ steps.compare.outputs.behind_by }}
+          AHEAD_BY: ${{ steps.compare.outputs.ahead_by }}
+          COMPARE_URL: ${{ steps.compare.outputs.compare_url }}
+        with:
+          github-token: ${{ secrets.SYNC_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo
+            const [upOwner, upRepo] = process.env.UPSTREAM_REPO.split('/')
+            const head = `${upOwner}:main`
+            const title = process.env.REVIEW_TITLE
+
+            const body = [
+              `上游 \`${process.env.UPSTREAM_REPO}\` 有新的 commit 需要合併。`,
+              '',
+              `- 落後 **${process.env.BEHIND_BY}** 個 commit ／ 領先 **${process.env.AHEAD_BY}** 個 commit`,
+              '- 自動同步偵測到衝突,已中止並移交本 PR 處理。',
+              '',
+              `**完整差異**:${process.env.COMPARE_URL}`,
+              '',
+              '## 處理方式',
+              '',
+              '1. 在本 PR 的 **Files changed** 分頁解決衝突。',
+              '2. 確認自己客製化的檔案沒被上游蓋掉。',
+              '3. 按 **Merge pull request**。',
+              '',
+              '合併會建立 merge commit,GitHub 落後數歸零,',
+              'GitHub Pages 也會由這次 push 自動重新部署。',
+            ].join('\n')
+
+            const open = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head,
+              base: 'main',
+              per_page: 100,
+            })
+
+            if (open.length) {
+              const { data: pr } = await github.request(
+                'PATCH /repos/{owner}/{repo}/pulls/{pull_number}',
+                { owner, repo, pull_number: open[0].number, title, body },
+              )
+              core.info(`已更新既有 PR #${pr.number}`)
+              await core.summary
+                .addHeading('已移交人工審查')
+                .addRaw(`- PR #${pr.number} 已更新`)
+                .write()
+              return
+            }
+
+            try {
+              const { data: pr } = await github.request(
+                'POST /repos/{owner}/{repo}/pulls',
+                {
+                  owner,
+                  repo,
+                  title,
+                  body,
+                  head,
+                  base: 'main',
+                  maintainer_can_modify: true,
+                },
+              )
+              core.info(`已建立 PR #${pr.number}`)
+              await core.summary
+                .addHeading('已移交人工審查')
+                .addRaw(`- PR #${pr.number} 已建立,請解決衝突後合併。`)
+                .write()
+            } catch (err) {
+              await core.summary
+                .addHeading('無法建立審查 PR')
+                .addRaw(
+                  `跨 fork PR 建立失敗（head=\`${head}\`,HTTP ${err.status}）。\n\n` +
+                    `這是預期外的結果,請回報以便改用固定分支方案。`,
+                )
+                .write()
+              core.setFailed(`無法建立跨 fork PR:HTTP ${err.status} ${err.message}`)
+            }
