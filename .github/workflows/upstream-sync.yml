@@ -33,8 +33,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
 
-      - name: Commit and push allow-listed updates
-        if: steps.sync.outputs.has-changes == 'true'
+      - name: Commit upstream history and allow-listed updates
+        if: steps.sync.outputs.has-changes == 'true' || steps.sync.outputs.history-updated == 'true'
         run: |
           git config user.name "Canaan-HS"
           git config user.email "s3459897@gmail.com"
