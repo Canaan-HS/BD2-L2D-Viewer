@@ -61,6 +61,8 @@ images — and lists them in the character sidebar with an EX badge.
   background.
 - External models are served by the local dev server, so they only appear while
   `pnpm dev` is running.
+- A "Custom models" toggle in the character sidebar narrows the list down to
+  external models only.
 
 ### Fullscreen Viewer
 
@@ -75,6 +77,17 @@ animation. The active range is highlighted on the timeline. It works with both
 regular animations and cutscene sequences, and exports (video and image
 sequence) respect the A-B range. The loop clears automatically when switching
 character or category, or when seeking outside the range.
+
+### Voice Lines
+
+Pausing the player pauses the character's voice line too, and resuming
+continues from that point instead of restarting it.
+
+### Video Export in Firefox
+
+Video export falls back to `MediaRecorder` in browsers without WebCodecs
+support, so it works in Firefox as well. WebM has no alpha channel, so a
+transparent export is not available on that path.
 
 ### Other Improvements
 
