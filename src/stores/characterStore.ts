@@ -51,6 +51,12 @@ export const useCharacterStore = defineStore('characterStore', {
     layerVisibility: {} as Record<string, boolean>,
     layerSelectionEnabled: false as boolean,
     selectedLayerName: null as string | null,
+    previewLayerName: null as string | null,
     hiddenLayerStack: [] as string[],
   }),
+  actions: {
+    setPreviewLayer(name: string | null) {
+      if (this.previewLayerName !== name) this.previewLayerName = name
+    },
+  },
 })

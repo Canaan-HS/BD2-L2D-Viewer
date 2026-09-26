@@ -78,6 +78,11 @@ regular animations and cutscene sequences, and exports (video and image
 sequence) respect the A-B range. The loop clears automatically when switching
 character or category, or when seeking outside the range.
 
+### Layer Preview
+
+Hovering over a layer in the sidebar highlights the matching region on the model
+in real time, and clicking locks it in place.
+
 ### Voice Lines
 
 Pausing the player pauses the character's voice line too, and resuming
