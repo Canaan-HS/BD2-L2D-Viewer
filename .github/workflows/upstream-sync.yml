@@ -51,6 +51,7 @@ jobs:
               },
             )
 
+            core.info(`與上游比較：落後 ${data.behind_by}，領先 ${data.ahead_by}`)
             core.setOutput('behind_by', String(data.behind_by))
             core.setOutput('ahead_by', String(data.ahead_by))
             core.setOutput('compare_url', data.html_url)
@@ -66,16 +67,15 @@ jobs:
             let result = 'unknown'
 
             try {
-              await github.request(
+              const { data } = await github.request(
                 'POST /repos/{owner}/{repo}/merge-upstream',
-                { owner, repo, branch: 'main', merge_method: 'merge' },
+                { owner, repo, branch: 'main' },
               )
+              core.info(`merge-upstream 成功：${data.merge_type ?? 'unknown'} — ${data.message ?? ''}`)
               result = 'merged'
             } catch (err) {
               if (err.status === 409) {
                 result = 'conflict'
-              } else if (err.status === 422) {
-                result = 'noop'
               } else {
                 core.setFailed(`merge-upstream 失敗:HTTP ${err.status} ${err.message}`)
                 return
